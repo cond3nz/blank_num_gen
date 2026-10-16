@@ -886,8 +886,8 @@ func indexOfString(list []string, s string) int {
 
 // optsKey — короткий ключ параметров, влияющих на миниатюру.
 func optsKey(o GenerateOptions) string {
-	return fmt.Sprintf("%v|%g|%g|%g|%g|%g|%d|%d|%s|%g|%t|%t|%d,%d,%d|%s|%s",
-		o.Numbers, o.PageWMM, o.PageHMM, o.MarginXMM, o.MarginYMM, o.LineHeightMM(),
+	return fmt.Sprintf("%v|%g|%g|%t|%g|%g|%g|%d|%d|%s|%g|%t|%t|%d,%d,%d|%s|%s",
+		o.Numbers, o.PageWMM, o.PageHMM, o.Landscape, o.MarginXMM, o.MarginYMM, o.LineHeightMM(),
 		o.Row, o.Col, o.FontFamily, o.FontSizePt, o.Bold, o.Italic,
 		o.Color.R, o.Color.G, o.Color.B, o.Prefix, o.Suffix)
 }

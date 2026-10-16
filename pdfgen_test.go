@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -256,5 +258,110 @@ func TestRunCLIMissingOutput(t *testing.T) {
 	var buf bytes.Buffer
 	if err := runCLI([]string{"-s", "1"}, &buf); err == nil {
 		t.Fatal("ожидалась ошибка: не указан -o")
+	}
+}
+
+// pdfTextBaselineMM достаёт из незашифрованного PDF координату базовой линии
+// текста (в мм от верхнего края страницы), которую записал fpdf.
+func pdfTextBaselineMM(t *testing.T, data []byte, opts GenerateOptions) float64 {
+	t.Helper()
+
+	// fpdf пишет текст так: BT x y Td (...)Tj ET
+	const marker = ")Tj ET"
+	i := bytes.Index(data, []byte(marker))
+	if i < 0 {
+		t.Fatal("в PDF не найден текстовый оператор Tj")
+	}
+	// координаты стоят перед "Td": "BT x y Td"
+	head := data[:i]
+	j := bytes.LastIndex(head, []byte("BT "))
+	if j < 0 {
+		t.Fatal("не найден блок BT")
+	}
+	rest := head[j+3:]
+	k := bytes.Index(rest, []byte("Td"))
+	if k < 0 {
+		t.Fatalf("не найден оператор Td: %q", head[j:i])
+	}
+	fields := bytes.Fields(rest[:k])
+	if len(fields) < 2 {
+		t.Fatalf("не разобраны координаты текста: %q", head[j:i])
+	}
+	y, err := strconv.ParseFloat(string(fields[1]), 64)
+	if err != nil {
+		t.Fatalf("координата Y %q: %v", fields[1], err)
+	}
+	// в PDF точка отсчёта — нижний край страницы, нам нужна высота над ним
+	_, pageH := opts.PageSizeMM()
+	return (pageH*72/25.4 - y) * 25.4 / 72 // пункты → миллиметры от верхнего края
+}
+
+// TestPDFBaselineMatchesMargins проверяет, что в готовом PDF отступы от края
+// до края цифр сверху и снизу равны заданному значению: fpdf размещает текст
+// в ячейке по своей формуле, поэтому верх ячейки приходится считать самим.
+func TestPDFBaselineMatchesMargins(t *testing.T) {
+	fonts := []string{"Helvetica", "Times", "Courier", DejaVuFamily}
+	sizes := []float64{8, 12, 22, 60}
+	pages := []PagePreset{{Name: "A4", W: 210, H: 297}, {Name: "A3", W: 297, H: 420}, {Name: "Letter", W: 215.9, H: 279.4}}
+	rows := []int{RowTop, RowMiddle, RowBottom}
+
+	for _, font := range fonts {
+		for _, size := range sizes {
+			for _, page := range pages {
+				for _, row := range rows {
+					opts := baseOptions()
+					opts.Numbers = []int{42}
+					opts.PageWMM, opts.PageHMM = page.W, page.H
+					opts.FontFamily, opts.FontSizePt = font, size
+					opts.MarginXMM, opts.MarginYMM = 15, 12
+					opts.Row, opts.Prefix = row, "A" // ASCII — без встроенного шрифта
+					if font == DejaVuFamily {
+						opts.Prefix = "А" // кириллица, чтобы шрифт реально подхватился
+					}
+
+					var buf bytes.Buffer
+					if err := generatePDF(&buf, opts, false); err != nil {
+						t.Fatalf("%s %gpt %s строка %d: %v", font, size, page.Name, row, err)
+					}
+
+					got := pdfTextBaselineMM(t, buf.Bytes(), opts)
+					want := opts.BaselineMM()
+					if math.Abs(got-want) > 0.2 {
+						t.Errorf("%s %gpt %s строка %d: базовая линия %.2f мм, ожидалось %.2f мм",
+							font, size, page.Name, row, got, want)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestPDFMarginsAreSymmetric проверяет, что одинаковый отступ сверху и снизу
+// даёт одинаковый видимый зазор до края листа.
+func TestPDFMarginsAreSymmetric(t *testing.T) {
+	for _, font := range []string{"Helvetica", "Times", DejaVuFamily} {
+		for _, size := range []float64{8, 12, 22, 60} {
+			const margin = 12.0
+
+			top := baseOptions()
+			top.Numbers = []int{1}
+			top.FontFamily, top.FontSizePt = font, size
+			top.MarginYMM, top.Row = margin, RowTop
+
+			bottom := top
+			bottom.Row = RowBottom
+
+			cap, descent := fontVerticalMetrics(font)
+			fs := size * 25.4 / 72
+			_, ph := top.PageSizeMM()
+
+			topInk := top.BaselineMM() - cap*fs
+			bottomInk := ph - (bottom.BaselineMM() + descent*fs)
+
+			if math.Abs(topInk-margin) > 0.001 || math.Abs(bottomInk-margin) > 0.001 {
+				t.Errorf("%s %gpt: сверху %.3f мм, снизу %.3f мм, ожидалось по %.1f мм",
+					font, size, topInk, bottomInk, margin)
+			}
+		}
 	}
 }

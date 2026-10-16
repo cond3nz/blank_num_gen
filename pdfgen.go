@@ -212,6 +212,12 @@ func alignmentFor(col int) string {
 // GeneratePDF создаёт PDF с пустыми страницами, на каждой из которых
 // в заданной позиции напечатан соответствующий номер.
 func GeneratePDF(w io.Writer, opts GenerateOptions) error {
+	return generatePDF(w, opts, true)
+}
+
+// generatePDF — внутренняя реализация: compress управляет сжатием потоков,
+// незашифрованный вариант используется в тестах для проверки координат.
+func generatePDF(w io.Writer, opts GenerateOptions, compress bool) error {
 	if err := opts.Validate(); err != nil {
 		return err
 	}
@@ -224,7 +230,7 @@ func GeneratePDF(w io.Writer, opts GenerateOptions) error {
 	pdf := fpdf.New(orientation, "mm", "A4", "")
 	pdf.SetMargins(0, 0, 0)
 	pdf.SetAutoPageBreak(false, 0)
-	pdf.SetCompression(true)
+	pdf.SetCompression(compress)
 	if opts.Title != "" {
 		pdf.SetTitle(opts.Title, true)
 	}
@@ -241,17 +247,18 @@ func GeneratePDF(w io.Writer, opts GenerateOptions) error {
 	}
 	style := fontStyleCode(opts.Bold, opts.Italic)
 
-	pw, ph := opts.PageSizeMM()
+	pw, _ := opts.PageSizeMM()
 	lh := opts.LineHeightMM()
 	boxW := pw - 2*opts.MarginXMM
 	align := alignmentFor(opts.Col)
+	cellTop := opts.CellTopMM()
 
 	for _, n := range opts.Numbers {
 		pdf.AddPageFormat(orientation, fpdf.SizeType{Wd: opts.PageWMM, Ht: opts.PageHMM})
 		pdf.SetFont(family, style, opts.FontSizePt)
 		pdf.SetTextColor(opts.Color.R, opts.Color.G, opts.Color.B)
 
-		pdf.SetXY(opts.MarginXMM, opts.RowY(lh, ph))
+		pdf.SetXY(opts.MarginXMM, cellTop)
 		pdf.CellFormat(boxW, lh, LabelFor(n, opts.Prefix, opts.Suffix), "", 0, align, false, 0, "")
 	}
 
@@ -261,7 +268,8 @@ func GeneratePDF(w io.Writer, opts GenerateOptions) error {
 	return pdf.Output(w)
 }
 
-// RowY возвращает координату Y (в мм) для строки в заданной ячейке сетки 3x3.
+// RowY возвращает координату Y (в мм) для верхней границы строки в заданной
+// ячейке сетки 3x3.
 func (o GenerateOptions) RowY(lineHeight, pageHeight float64) float64 {
 	switch o.Row {
 	case RowMiddle:
@@ -271,6 +279,59 @@ func (o GenerateOptions) RowY(lineHeight, pageHeight float64) float64 {
 	default:
 		return o.MarginYMM
 	}
+}
+
+// FontSizeMM — кегль в миллиметрах.
+func (o GenerateOptions) FontSizeMM() float64 {
+	return o.FontSizePt * 25.4 / 72
+}
+
+// fontVerticalMetrics возвращает высоту цифр (cap height) и спуск шрифта
+// в долях кегля. Значения для стандартных шрифтов взяты из метрик Adobe:
+// Helvetica 718/207, Times 662/217, Courier 562/562-157.
+func fontVerticalMetrics(family string) (capHeight, descent float64) {
+	switch family {
+	case DejaVuFamily:
+		return 0.729, 0.236
+	case "Times":
+		return 0.662, 0.217
+	case "Courier":
+		return 0.562, 0.157
+	default: // Helvetica и всё остальное
+		return 0.718, 0.207
+	}
+}
+
+// BaselineMM — положение базовой линии номера (мм от верхнего края листа).
+//
+// Отступ задаётся до краёв рисунка, а не до ячейки: сверху это расстояние от
+// края до верха цифр, снизу — от низа цифр до края. Благодаря этому верхний и
+// нижний отступы при одинаковом значении выглядят одинаково, а положение
+// номера на странице не зависит от кегля.
+func (o GenerateOptions) BaselineMM() float64 {
+	_, ph := o.PageSizeMM()
+	fs := o.FontSizeMM()
+	cap, descent := fontVerticalMetrics(o.FontFamily)
+
+	switch o.Row {
+	case RowMiddle:
+		return ph/2 + cap*fs/2
+	case RowBottom:
+		return ph - o.MarginYMM - descent*fs
+	default:
+		return o.MarginYMM + cap*fs
+	}
+}
+
+// CellTopMM — верх ячейки, в которую fpdf поместит текст так, чтобы базовая
+// линия оказалась ровно в BaselineMM.
+//
+// fpdf размещает текст в ячейке высотой h на расстоянии 0.5*h + 0.3*кегль от её
+// верхнего края (см. CellFormat), поэтому верх ячейки вычисляется обратно.
+func (o GenerateOptions) CellTopMM() float64 {
+	lh := o.LineHeightMM()
+	fs := o.FontSizeMM()
+	return o.BaselineMM() - (0.5*lh + 0.3*fs)
 }
 
 // registerEmbeddedFonts добавляет встроенные шрифты DejaVu (для кириллицы).

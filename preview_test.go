@@ -289,11 +289,10 @@ func TestPreviewStaysInsidePage(t *testing.T) {
 	}
 }
 
-// TestPreviewBaselineIsFixed проверяет главное свойство миниатюры: цифра стоит
-// на настоящей базовой линии строки. Раньше цифра центрировалась по строке,
-// поэтому с увеличением кегля расстояние до настоящей линии росло, а при
-// нулевом отступе сверху она пересекалась с вспомогательной линией — теперь
-// такой линии нет вовсе.
+// TestPreviewBaselineIsFixed проверяет, что положение цифры в миниатюре не
+// зависит от кегля: она всегда стоит на одном и том же месте относительно
+// края. Раньше цифра центрировалась по строке, поэтому с увеличением кегля
+// расстояние до настоящей линии росло.
 func TestPreviewBaselineIsFixed(t *testing.T) {
 	const boxW, boxH = 445, 325
 
@@ -311,21 +310,19 @@ func TestPreviewBaselineIsFixed(t *testing.T) {
 
 					pw, ph := opts.PageSizeMM()
 					scale := math.Min(float64(boxW-24)/pw, float64(boxH-24)/ph)
-
-					// независимо пересчитываем, где должна стоять базовая линия:
-					// настоящая позиция, но прижатая внутрь листа
 					fontPx := math.Max(size*25.4/72*scale, minPreviewFontPx)
-					face := newPreviewFace(opts.Bold, fontPx)
+
+					// независимо пересчитываем ожидаемую базовую линию
+					face := newPreviewFace(opts.Bold, opts.Italic, fontPx)
 					if face == nil {
 						t.Fatalf("%gpt: не удалось получить метрики шрифта", size)
 					}
-					ascent := float64(face.Metrics().Ascent) / 64
 					descent := float64(face.Metrics().Descent) / 64
 					face.Close()
 
-					expected := float64(page.Min.Y) + trueBaselineY(opts, scale, ph)
-					minB := float64(page.Min.Y) + ascent + 1
-					maxB := float64(page.Max.Y) - descent - 1
+					expected := previewBaseline(opts, float64(page.Min.Y), scale, fontPx)
+					minB := float64(page.Min.Y) + 0.8*fontPx + 1
+					maxB := float64(page.Max.Y) - descent*1.05 - 1
 					if maxB < minB {
 						expected = clampFloat(expected, float64(page.Min.Y)+1, float64(page.Max.Y)-2)
 					} else {
@@ -384,5 +381,95 @@ func TestPreviewHasNoHelperLine(t *testing.T) {
 	// цифра «1» занимает около 20 строк; линия на всю ширину дала бы больше
 	if darkRows > 26 {
 		t.Fatalf("в верхней части листа %d тёмных строк — похоже на вспомогательную линию", darkRows)
+	}
+}
+
+// TestPreviewMarginsMatchRequested проверяет, что видимые отступы от края листа
+// до цифр равны заданному значению — одинаково сверху и снизу. Раньше на A3
+// (где масштаб миниатюры заметно меньше единицы) высота страницы передавалась
+// в пикселях вместо миллиметров, и номер уезжал на 118 мм от нижнего края.
+func TestPreviewMarginsMatchRequested(t *testing.T) {
+	const boxW, boxH = 442, 325
+
+	pages := []PagePreset{{Name: "A4", W: 210, H: 297}, {Name: "A3", W: 297, H: 420}, {Name: "Letter", W: 215.9, H: 279.4}}
+
+	for _, page := range pages {
+		for _, margin := range []float64{0, 5, 12, 25} {
+			for _, size := range []float64{8, 12, 22, 60} {
+				for _, row := range []int{RowTop, RowBottom} {
+					opts := baseOptions()
+					opts.PageWMM, opts.PageHMM = page.W, page.H
+					opts.MarginXMM, opts.MarginYMM = 15, margin
+					opts.FontSizePt, opts.Row = size, row
+					opts.Prefix = "Стр."
+
+					img := RenderPreview(opts, 1, boxW, boxH)
+					pw, ph := opts.PageSizeMM()
+					scale := math.Min(float64(boxW-24)/pw, float64(boxH-24)/ph)
+					pageW := int(math.Round(pw * scale))
+					pageH := int(math.Round(ph * scale))
+					originX := int(math.Round(12 + (float64(boxW-24)-float64(pageW))/2))
+					originY := int(math.Round(12 + (float64(boxH-24)-float64(pageH))/2))
+
+					// порог выше обычного: ловим и сглаженные края цифры,
+					// иначе измеренный зазор оказывается на 2-3 px больше
+					// сканируем лист, не задевая его рамку, порог выше обычного:
+					// так ловим и сглаженные края цифры
+					scan := image.Rect(originX, originY, originX+pageW, originY+pageH).Inset(2)
+					minY, maxY := math.MaxInt, math.MinInt
+					for y := scan.Min.Y; y < scan.Max.Y; y++ {
+						for x := scan.Min.X; x < scan.Max.X; x++ {
+							r, g, b, _ := img.At(x, y).RGBA()
+							if r>>8 < 215 && g>>8 < 215 && b>>8 < 215 {
+								minY, maxY = min(minY, y), max(maxY, y)
+							}
+						}
+					}
+					if minY > maxY {
+						t.Fatalf("%s, отступ %g, %gpt: номер не нарисован", page.Name, margin, size)
+					}
+
+					var gap float64
+					if row == RowTop {
+						gap = float64(minY-originY) / scale
+					} else {
+						gap = float64(originY+pageH-1-maxY) / scale
+					}
+					// допуск — округление до пикселя и запас в 1 пиксель от края
+					tolerance := 1.0 + 2/scale
+					if math.Abs(gap-margin) > tolerance {
+						t.Errorf("%s, %s, отступ %.0f мм, кегль %gpt: зазор %.2f мм (допуск %.2f)",
+							page.Name, []string{"сверху", "середина", "снизу"}[row], margin, size, gap, tolerance)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestPreviewItalicIsApplied проверяет, что курсив в миниатюре действительно
+// рисуется: раньше шрифт всегда брался обычным, и курсив было видно только в PDF.
+func TestPreviewItalicIsApplied(t *testing.T) {
+	opts := baseOptions()
+	opts.Prefix = "Номер"
+	opts.FontSizePt = 40
+
+	_, regular := inkBounds(t, opts, 42, 445, 325)
+
+	for _, tc := range []struct {
+		name         string
+		bold, italic bool
+	}{
+		{"курсив", false, true},
+		{"жирный", true, false},
+		{"жирный курсив", true, true},
+	} {
+		styled := opts
+		styled.Bold, styled.Italic = tc.bold, tc.italic
+
+		_, got := inkBounds(t, styled, 42, 445, 325)
+		if got == regular {
+			t.Errorf("%s: рисунок совпал с обычным начертанием — стиль не применён", tc.name)
+		}
 	}
 }
