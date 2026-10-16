@@ -10,6 +10,9 @@ on:
 permissions:
   contents: write
 
+env:
+  LDFLAGS: -s -w
+
 jobs:
   build:
     runs-on: windows-latest
@@ -24,8 +27,25 @@ jobs:
       - name: Тесты
         run: go test ./...
 
-      - name: Сборка
-        run: make windows cli
+      - name: Сборка 64-битной версии
+        shell: pwsh
+        run: |
+          $env:CGO_ENABLED = "0"
+          go build -trimpath -ldflags "$env:LDFLAGS -H=windowsgui" -o dist/blank_num_gen.exe .
+
+      - name: Сборка 32-битной версии
+        shell: pwsh
+        run: |
+          $env:GOARCH = "386"
+          $env:CGO_ENABLED = "0"
+          go build -trimpath -ldflags "$env:LDFLAGS -H=windowsgui" -o dist/blank_num_gen-32.exe .
+
+      - name: Сборка консольной версии
+        shell: pwsh
+        run: |
+          $env:GOARCH = "amd64"
+          $env:CGO_ENABLED = "0"
+          go build -trimpath -ldflags "$env:LDFLAGS" -o dist/blank_num_gen-cli.exe .
 
       - name: Артефакты сборки
         uses: actions/upload-artifact@v4
@@ -38,7 +58,7 @@ jobs:
           if-no-files-found: error
 
       - name: Публикация релиза
-        if: startsWith(github.ref, "refs/tags/v")
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
