@@ -103,6 +103,10 @@ func renderIcon(fnt *opentype.Font, size int) image.Image {
 
 // drawDigit рисует цифру «1» по центру нижней части листа.
 func drawDigit(img *image.NRGBA, fnt *opentype.Font, s, pageX0, pageX1, pageY1 float64) {
+	if fnt == nil {
+		return
+	}
+
 	sizePx := s * 0.42
 	face, err := opentype.NewFace(fnt, &opentype.FaceOptions{Size: sizePx, DPI: 72})
 	if err != nil {
