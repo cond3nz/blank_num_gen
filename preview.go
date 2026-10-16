@@ -151,31 +151,38 @@ func drawNumber(img *image.RGBA, opts GenerateOptions, number int, originX, orig
 	default:
 		x = left
 	}
+	// номер не должен вылезать за пределы листа
+	x = clampFloat(x, originX, originX+pageW-textW)
 
-	// настоящая базовая линия (по настоящим метрикам шрифта)
-	trueBaseline := trueBaselineY(opts, scale, pageH) + originY
-	// базовая линия увеличенного номера, прижатая к центру строки
+	// базовая линия увеличенного номера, прижатая к центру настоящей строки
 	baseline := centerY + (descent-ascent)/2
 
-	if !sameFontSize(trueFontPx, fontPx) {
-		// рисуем направляющую: где в PDF будет низ строки
-		line := color.NRGBA{c.R, c.G, c.B, 0x60}
-		draw.Draw(img,
-			image.Rect(int(math.Round(x)), int(math.Round(trueBaseline)), int(math.Round(x+textW))+1, int(math.Round(trueBaseline))+1),
-			image.NewUniform(line), image.Point{}, draw.Src)
+	// и номер, и направляющая остаются внутри листа, даже если отступ равен
+	// нулю и настоящая строка упирается в самый край страницы
+	const inset = 1.0
+	minBaseline := originY + ascent + inset
+	maxBaseline := originY + pageH - descent - inset
+	if maxBaseline < minBaseline {
+		baseline = clampFloat(centerY, originY+1, originY+pageH-2)
+	} else {
+		baseline = clampFloat(baseline, minBaseline, maxBaseline)
 	}
 
-	// номер не должен вылезать за пределы листа
-	minBaseline := originY + ascent
-	maxBaseline := originY + pageH - descent
-	if baseline < minBaseline {
-		baseline = minBaseline
-	}
-	if baseline > maxBaseline {
-		baseline = maxBaseline
-	}
-	if maxBaseline < minBaseline {
-		baseline = centerY
+	if !sameFontSize(trueFontPx, fontPx) {
+		// направляющая: где в PDF будет низ настоящей строки
+		trueBaseline := clampFloat(trueBaselineY(opts, scale, pageH)+originY,
+			originY+1, originY+pageH-2)
+		line := color.NRGBA{c.R, c.G, c.B, 0x60}
+		guide := image.Rect(
+			int(math.Round(x)),
+			int(math.Round(trueBaseline)),
+			int(math.Round(x+textW))+1,
+			int(math.Round(trueBaseline))+1,
+		)
+		// при нулевых отступах линия упирается в край — обрезаем по листу
+		guide = guide.Intersect(image.Rect(
+			int(originX), int(originY), int(originX+pageW), int(originY+pageH)))
+		draw.Draw(img, guide, image.NewUniform(line), image.Point{}, draw.Src)
 	}
 
 	d := &font.Drawer{

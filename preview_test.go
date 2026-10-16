@@ -236,3 +236,55 @@ func TestPreviewNumberIsReadable(t *testing.T) {
 		}
 	}
 }
+
+// TestPreviewStaysInsidePage проверяет, что номер и направляющая никогда не
+// выходят за пределы листа, в том числе при нулевых отступах: раньше при
+// отступе снизу 0 мм настоящая строка упиралась в край страницы и тонкая
+// линия уезжала на пиксель за границу миниатюры.
+func TestPreviewStaysInsidePage(t *testing.T) {
+	for _, margin := range []float64{0, 1, 5, 15} {
+		for row := RowTop; row <= RowBottom; row++ {
+			for col := ColLeft; col <= ColRight; col++ {
+				for _, size := range []float64{6, 8, 12, 19, 20, 33, 60} {
+					opts := baseOptions()
+					opts.Row, opts.Col, opts.FontSizePt = row, col, size
+					opts.MarginXMM, opts.MarginYMM = margin, margin
+
+					const boxW, boxH = 445, 325
+					img := RenderPreview(opts, 1, boxW, boxH)
+					if img == nil {
+						t.Fatalf("отступ %g, строка %d, столбец %d, %gpt: миниатюра не построена",
+							margin, row, col, size)
+					}
+
+					pw, ph := opts.PageSizeMM()
+					scale := math.Min(float64(boxW-24)/pw, float64(boxH-24)/ph)
+					pageW := int(math.Round(pw * scale))
+					pageH := int(math.Round(ph * scale))
+					originX := int(math.Round(float64(12) + (float64(boxW-24)-float64(pageW))/2))
+					originY := int(math.Round(float64(12) + (float64(boxH-24)-float64(pageH))/2))
+					page := image.Rect(originX, originY, originX+pageW, originY+pageH)
+
+					// вокруг листа допускается только тень шириной в несколько пикселей
+					halo := page.Inset(-5)
+					for y := halo.Min.Y; y < halo.Max.Y; y++ {
+						if y < 0 || y >= boxH {
+							continue
+						}
+						for x := halo.Min.X; x < halo.Max.X; x++ {
+							if x < 0 || x >= boxW || image.Pt(x, y).In(page) {
+								continue
+							}
+							r, g, b, _ := img.At(x, y).RGBA()
+							// фон миниатюры — 0xE6E8EC, тень — 0xC8CBD2
+							if r>>8 < 200 || g>>8 < 200 || b>>8 < 200 {
+								t.Fatalf("отступ %g, строка %d, столбец %d, %gpt: пиксель (%d,%d)=%d,%d,%d вне листа %v",
+									margin, row, col, size, x, y, r>>8, g>>8, b>>8, page)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
