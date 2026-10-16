@@ -98,27 +98,24 @@ func RenderPreview(opts GenerateOptions, number int, boxW, boxH int) image.Image
 }
 
 // minPreviewFontPx — минимальный кегль номера в миниатюре. На реальном листе
-// A4 кегль 12 pt занимает около 5 пикселей, поэтому в превью цифра
-// показывается крупнее; положение по базовой линии остаётся настоящим.
+// A4 кегль 12 pt занимает около 5 пикселей и не читается, поэтому в превью
+// цифра показывается крупнее, оставаясь на настоящей базовой линии.
 const minPreviewFontPx = 12.0
 
 // drawNumber рисует номер страницы в выбранной позиции.
 //
-// Положение считается по-настоящему (в масштабе страницы), но сам номер
-// рисуется минимальным читаемым кеглем, а тонкая линия показывает, где
-// на самом деле окажется нижняя граница строки в PDF.
+// Положение считается по-настоящему (в масштабе страницы): базовая линия
+// цифры совпадает с настоящей базовой линией строки в PDF. Чтобы номер был
+// читаем в маленькой миниатюре, цифра рисуется минимальным читаемым кеглем —
+// она растёт вверх от настоящей линии, а не смещается относительно неё.
 func drawNumber(img *image.RGBA, opts GenerateOptions, number int, originX, originY, pageW, pageH, scale float64, c color.RGBA) {
 	label := LabelFor(number, opts.Prefix, opts.Suffix)
 	if label == "" || opts.FontSizePt <= 0 {
 		return
 	}
 
-	lineH := opts.LineHeightMM() * scale
-	// центр настоящей строки текста на миниатюре
-	centerY := originY + opts.RowY(opts.LineHeightMM(), pageH/scale)*scale + lineH/2
-
-	trueFontPx := opts.FontSizePt * 25.4 / 72 * scale
-	fontPx := math.Max(trueFontPx, minPreviewFontPx)
+	// увеличенный кегль нужен только для читаемости
+	fontPx := math.Max(opts.FontSizePt*25.4/72*scale, minPreviewFontPx)
 
 	face := newPreviewFace(opts.Bold, fontPx)
 	if face == nil {
@@ -154,35 +151,18 @@ func drawNumber(img *image.RGBA, opts GenerateOptions, number int, originX, orig
 	// номер не должен вылезать за пределы листа
 	x = clampFloat(x, originX, originX+pageW-textW)
 
-	// базовая линия увеличенного номера, прижатая к центру настоящей строки
-	baseline := centerY + (descent-ascent)/2
-
-	// и номер, и направляющая остаются внутри листа, даже если отступ равен
-	// нулю и настоящая строка упирается в самый край страницы
+	// Цифра увеличена до читаемого размера, но её базовая линия совпадает с
+	// настоящей: чем крупнее кегль, тем выше растёт цифра от этой линии, а
+	// не «отъезжает» от неё. Если прижатая к краю строка вылезла бы за лист,
+	// номер сдвигается внутрь — иначе он не помещался бы в страницу вовсе.
 	const inset = 1.0
+	baseline := trueBaselineY(opts, scale, pageH) + originY
 	minBaseline := originY + ascent + inset
 	maxBaseline := originY + pageH - descent - inset
 	if maxBaseline < minBaseline {
-		baseline = clampFloat(centerY, originY+1, originY+pageH-2)
+		baseline = clampFloat(baseline, originY+1, originY+pageH-2)
 	} else {
 		baseline = clampFloat(baseline, minBaseline, maxBaseline)
-	}
-
-	if !sameFontSize(trueFontPx, fontPx) {
-		// направляющая: где в PDF будет низ настоящей строки
-		trueBaseline := clampFloat(trueBaselineY(opts, scale, pageH)+originY,
-			originY+1, originY+pageH-2)
-		line := color.NRGBA{c.R, c.G, c.B, 0x60}
-		guide := image.Rect(
-			int(math.Round(x)),
-			int(math.Round(trueBaseline)),
-			int(math.Round(x+textW))+1,
-			int(math.Round(trueBaseline))+1,
-		)
-		// при нулевых отступах линия упирается в край — обрезаем по листу
-		guide = guide.Intersect(image.Rect(
-			int(originX), int(originY), int(originX+pageW), int(originY+pageH)))
-		draw.Draw(img, guide, image.NewUniform(line), image.Point{}, draw.Src)
 	}
 
 	d := &font.Drawer{
@@ -197,16 +177,27 @@ func drawNumber(img *image.RGBA, opts GenerateOptions, number int, originX, orig
 	d.DrawString(label)
 }
 
-// trueBaselineY возвращает положение нижней границы настоящей строки текста
-// относительно верха листа, в пикселях миниатюры.
+// trueBaselineY возвращает положение настоящей базовой линии строки текста
+// относительно верха листа, в пикселях миниатюры. В PDF fpdf ставит текст в
+// ячейку высотой lh, поэтому базовая линия — это низ ячейки минус спуск шрифта.
 func trueBaselineY(opts GenerateOptions, scale, pageHeightMM float64) float64 {
 	lh := opts.LineHeightMM()
-	bottom := opts.RowY(lh, pageHeightMM) + lh // низ строки
-	return bottom * scale
+	lineBottom := opts.RowY(lh, pageHeightMM) + lh
+	return lineBottom*scale - trueDescentPx(opts, scale)
 }
 
-func sameFontSize(truePx, px float64) bool {
-	return math.Abs(truePx-px) < 0.01
+// trueDescentPx — спуск настоящего шрифта в пикселях миниатюры.
+func trueDescentPx(opts GenerateOptions, scale float64) float64 {
+	size := opts.FontSizePt * 25.4 / 72 * scale
+	if size < 1 {
+		return 0
+	}
+	face := newPreviewFace(opts.Bold, size)
+	if face == nil {
+		return 0
+	}
+	defer face.Close()
+	return float64(face.Metrics().Descent) / 64
 }
 
 func drawRectBorder(img *image.RGBA, r image.Rectangle, c color.RGBA) {

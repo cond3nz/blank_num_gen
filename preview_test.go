@@ -288,3 +288,101 @@ func TestPreviewStaysInsidePage(t *testing.T) {
 		}
 	}
 }
+
+// TestPreviewBaselineIsFixed проверяет главное свойство миниатюры: цифра стоит
+// на настоящей базовой линии строки. Раньше цифра центрировалась по строке,
+// поэтому с увеличением кегля расстояние до настоящей линии росло, а при
+// нулевом отступе сверху она пересекалась с вспомогательной линией — теперь
+// такой линии нет вовсе.
+func TestPreviewBaselineIsFixed(t *testing.T) {
+	const boxW, boxH = 445, 325
+
+	for _, margin := range []float64{0, 5, 15} {
+		for row := RowTop; row <= RowBottom; row++ {
+			for col := ColLeft; col <= ColRight; col++ {
+				var previousGap = math.NaN()
+
+				for _, size := range []float64{6, 8, 12, 19, 20, 33, 60, 120} {
+					opts := baseOptions()
+					opts.Row, opts.Col, opts.FontSizePt = row, col, size
+					opts.MarginXMM, opts.MarginYMM = margin, margin
+
+					page, ink := inkBounds(t, opts, 1, boxW, boxH)
+
+					pw, ph := opts.PageSizeMM()
+					scale := math.Min(float64(boxW-24)/pw, float64(boxH-24)/ph)
+
+					// независимо пересчитываем, где должна стоять базовая линия:
+					// настоящая позиция, но прижатая внутрь листа
+					fontPx := math.Max(size*25.4/72*scale, minPreviewFontPx)
+					face := newPreviewFace(opts.Bold, fontPx)
+					if face == nil {
+						t.Fatalf("%gpt: не удалось получить метрики шрифта", size)
+					}
+					ascent := float64(face.Metrics().Ascent) / 64
+					descent := float64(face.Metrics().Descent) / 64
+					face.Close()
+
+					expected := float64(page.Min.Y) + trueBaselineY(opts, scale, ph)
+					minB := float64(page.Min.Y) + ascent + 1
+					maxB := float64(page.Max.Y) - descent - 1
+					if maxB < minB {
+						expected = clampFloat(expected, float64(page.Min.Y)+1, float64(page.Max.Y)-2)
+					} else {
+						expected = clampFloat(expected, minB, maxB)
+					}
+
+					// низ глифа на 1-2 px выше базовой линии из-за сглаживания
+					gap := float64(ink.Max.Y) - expected
+					if math.Abs(gap) > 4 {
+						t.Errorf("отступ %g, строка %d, столбец %d, %gpt: низ цифры на %.1f px, ожидалось около %.1f px (лист %v, цифра %v)",
+							margin, row, col, size, float64(ink.Max.Y), expected, page, ink)
+					}
+					if !math.IsNaN(previousGap) && math.Abs(gap-previousGap) > 2 {
+						t.Errorf("отступ %g, строка %d, столбец %d: смещение изменилось с %.1f на %.1f px при смене кегля",
+							margin, row, col, previousGap, gap)
+					}
+					previousGap = gap
+				}
+			}
+		}
+	}
+}
+
+// TestPreviewHasNoHelperLine проверяет, что в миниатюре нет отдельной
+// вспомогательной линии: при нулевом отступе сверху она пересекала цифру.
+func TestPreviewHasNoHelperLine(t *testing.T) {
+	opts := baseOptions()
+	opts.Row = RowTop
+	opts.MarginYMM = 0
+	opts.FontSizePt = 12
+
+	const boxW, boxH = 445, 325
+	img := RenderPreview(opts, 1, boxW, boxH)
+	if img == nil {
+		t.Fatal("миниатюра не построена")
+	}
+
+	pw, ph := opts.PageSizeMM()
+	scale := math.Min(float64(boxW-24)/pw, float64(boxH-24)/ph)
+	pageW := int(math.Round(pw * scale))
+	pageH := int(math.Round(ph * scale))
+	originX := int(math.Round(float64(12) + (float64(boxW-24)-float64(pageW))/2))
+	originY := int(math.Round(float64(12) + (float64(boxH-24)-float64(pageH))/2))
+
+	// верхние 40 px листа: если там только цифра, тёмных строк будет немного
+	darkRows := 0
+	for y := originY; y < originY+40; y++ {
+		for x := originX; x < originX+pageW; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			if r>>8 < 140 && g>>8 < 140 && b>>8 < 140 {
+				darkRows++
+				break
+			}
+		}
+	}
+	// цифра «1» занимает около 20 строк; линия на всю ширину дала бы больше
+	if darkRows > 26 {
+		t.Fatalf("в верхней части листа %d тёмных строк — похоже на вспомогательную линию", darkRows)
+	}
+}
