@@ -1,0 +1,48 @@
+name: build
+
+# Сборка Windows-версий на каждом пуше и публикация релиза при теге v*
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          check-latest: true
+
+      - name: Тесты
+        run: go test ./...
+
+      - name: Сборка
+        run: make windows cli
+
+      - name: Артефакты сборки
+        uses: actions/upload-artifact@v4
+        with:
+          name: blank_num_gen-windows
+          path: |
+            dist/blank_num_gen.exe
+            dist/blank_num_gen-32.exe
+            dist/blank_num_gen-cli.exe
+          if-no-files-found: error
+
+      - name: Публикация релиза
+        if: startsWith(github.ref, "refs/tags/v")
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/blank_num_gen.exe
+            dist/blank_num_gen-32.exe
+            dist/blank_num_gen-cli.exe
+          generate_release_notes: true
