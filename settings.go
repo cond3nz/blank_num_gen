@@ -60,12 +60,28 @@ func settingsPath() (string, error) {
 
 // LoadSettings читает настройки; при любой ошибке возвращает значения по умолчанию.
 func LoadSettings() AppSettings {
-	s := DefaultSettings()
-
 	path, err := settingsPath()
 	if err != nil {
-		return s
+		return DefaultSettings()
 	}
+	return LoadSettingsFrom(path)
+}
+
+// SaveSettings сохраняет настройки в %APPDATA%\blank_num_gen\settings.json.
+func SaveSettings(s AppSettings) error {
+	path, err := settingsPath()
+	if err != nil {
+		return err
+	}
+	return SaveSettingsTo(path, s)
+}
+
+// LoadSettingsFrom читает настройки из указанного файла; при любой ошибке
+// возвращает значения по умолчанию. Путь передаётся явно, чтобы поведение
+// не зависело от переменных окружения.
+func LoadSettingsFrom(path string) AppSettings {
+	s := DefaultSettings()
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return s
@@ -77,12 +93,8 @@ func LoadSettings() AppSettings {
 	return s
 }
 
-// SaveSettings сохраняет настройки в %APPDATA%\blank_num_gen\settings.json.
-func SaveSettings(s AppSettings) error {
-	path, err := settingsPath()
-	if err != nil {
-		return err
-	}
+// SaveSettingsTo сохраняет настройки в указанный файл.
+func SaveSettingsTo(path string, s AppSettings) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

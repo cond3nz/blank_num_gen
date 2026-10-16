@@ -7,15 +7,19 @@ import (
 	"testing"
 )
 
+// settingsFile возвращает путь к файлу настроек внутри временного каталога.
+func settingsFile(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "blank_num_gen", "settings.json")
+}
+
 func TestSettingsRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("APPDATA", filepath.Join(dir, "AppData", "Roaming"))
+	path := settingsFile(t)
 
 	want := DefaultSettings()
 	want.Sequence = "3-10,42"
 	want.RemoveDuplicates = true
-	want.PagePreset = "Legal"
+	want.PagePreset = "A3"
 	want.Landscape = true
 	want.MarginXMM = 20
 	want.MarginYMM = 25
@@ -29,34 +33,26 @@ func TestSettingsRoundTrip(t *testing.T) {
 	want.Prefix = "Стр. "
 	want.Suffix = " —"
 	want.OpenAfterCreate = false
-	want.LastDir = "/tmp"
+	want.LastDir = filepath.Join("some", "dir")
 
-	if err := SaveSettings(want); err != nil {
-		t.Fatalf("SaveSettings: %v", err)
+	if err := SaveSettingsTo(path, want); err != nil {
+		t.Fatalf("SaveSettingsTo: %v", err)
 	}
 
-	got := LoadSettings()
+	got := LoadSettingsFrom(path)
 	if got != want {
 		t.Fatalf("настройки не совпали:\nполучено  %+v\nожидалось %+v", got, want)
 	}
 }
 
 func TestLoadSettingsWithoutFile(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("APPDATA", filepath.Join(dir, "AppData", "Roaming"))
-
-	if got := LoadSettings(); got != DefaultSettings() {
+	if got := LoadSettingsFrom(settingsFile(t)); got != DefaultSettings() {
 		t.Fatalf("ожидались настройки по умолчанию, получено %+v", got)
 	}
 }
 
 func TestLoadSettingsBrokenFile(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("APPDATA", filepath.Join(dir, "AppData", "Roaming"))
-
-	path := filepath.Join(dir, "blank_num_gen", "settings.json")
+	path := settingsFile(t)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -64,14 +60,13 @@ func TestLoadSettingsBrokenFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := LoadSettings(); got != DefaultSettings() {
+	if got := LoadSettingsFrom(path); got != DefaultSettings() {
 		t.Fatalf("битый файл: ожидались значения по умолчанию, получено %+v", got)
 	}
 }
 
 func TestSettingsNormalize(t *testing.T) {
 	s := AppSettings{
-		Sequence:   "",
 		CustomWMM:  1,
 		CustomHMM:  -3,
 		MarginXMM:  -10,
@@ -101,6 +96,12 @@ func TestSettingsPageSize(t *testing.T) {
 	if w, h := s.PageSizeMM(); w != 210 || h != 297 {
 		t.Fatalf("A4: %v x %v", w, h)
 	}
+
+	s.PagePreset = "A3"
+	if w, h := s.PageSizeMM(); w != 297 || h != 420 {
+		t.Fatalf("A3: %v x %v", w, h)
+	}
+
 	s.PagePreset = CustomPageName
 	s.CustomWMM, s.CustomHMM = 148, 210
 	if w, h := s.PageSizeMM(); w != 148 || h != 210 {
@@ -109,15 +110,12 @@ func TestSettingsPageSize(t *testing.T) {
 }
 
 func TestSaveSettingsJSONIsReadable(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("APPDATA", filepath.Join(dir, "AppData", "Roaming"))
+	path := settingsFile(t)
 
-	if err := SaveSettings(DefaultSettings()); err != nil {
-		t.Fatalf("SaveSettings: %v", err)
+	if err := SaveSettingsTo(path, DefaultSettings()); err != nil {
+		t.Fatalf("SaveSettingsTo: %v", err)
 	}
 
-	path := filepath.Join(dir, "blank_num_gen", "settings.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("файл настроек не найден: %v", err)
@@ -128,5 +126,38 @@ func TestSaveSettingsJSONIsReadable(t *testing.T) {
 	}
 	if _, ok := raw["sequence"]; !ok {
 		t.Fatal("в файле нет поля sequence")
+	}
+}
+
+func TestSaveSettingsOverwrites(t *testing.T) {
+	path := settingsFile(t)
+
+	first := DefaultSettings()
+	first.Sequence = "1-3"
+	if err := SaveSettingsTo(path, first); err != nil {
+		t.Fatal(err)
+	}
+
+	second := DefaultSettings()
+	second.Sequence = "10-20"
+	if err := SaveSettingsTo(path, second); err != nil {
+		t.Fatalf("повторное сохранение: %v", err)
+	}
+
+	if got := LoadSettingsFrom(path); got.Sequence != second.Sequence {
+		t.Fatalf("ожидалась последняя запись %q, получено %q", second.Sequence, got.Sequence)
+	}
+}
+
+func TestSettingsPathInUserConfigDir(t *testing.T) {
+	path, err := settingsPath()
+	if err != nil {
+		t.Skipf("каталог настроек недоступен: %v", err)
+	}
+	if filepath.Base(filepath.Dir(path)) != "blank_num_gen" {
+		t.Fatalf("неожиданный путь настроек: %s", path)
+	}
+	if filepath.Base(path) != "settings.json" {
+		t.Fatalf("неожиданное имя файла настроек: %s", path)
 	}
 }
