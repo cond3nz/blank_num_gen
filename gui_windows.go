@@ -49,6 +49,10 @@ type appUI struct {
 
 	preview *walk.ImageView
 
+	// состояние последней нарисованной картинки: не перерисовываем зря
+	previewW, previewH int
+	previewOpts        string
+
 	lastDir string
 }
 
@@ -493,10 +497,15 @@ func (ui *appUI) buildPreview(parent walk.Container) error {
 	if err != nil {
 		return err
 	}
-	if err := note.SetText("Предпросмотр первой страницы"); err != nil {
+	if err := note.SetText("Предпросмотр первой страницы — номер показан крупнее, чем будет в PDF"); err != nil {
 		return err
 	}
 
+	// Область превью получает настоящий размер только после раскладки окна,
+	// поэтому перерисовываем её при каждом изменении размеров — иначе
+	// картинка, посчитанная по предположительному размеру, потом
+	// масштабируется и «уезжает».
+	ui.preview.SizeChanged().Attach(func() { ui.updatePreview() })
 	ui.mw.SizeChanged().Attach(func() { ui.updatePreview() })
 	return nil
 }
@@ -748,15 +757,20 @@ func (ui *appUI) updatePreview() {
 }
 
 func (ui *appUI) updatePreviewWith(opts GenerateOptions) {
-	if ui.preview == nil {
+	if ui.preview == nil || len(opts.Numbers) == 0 {
 		return
 	}
 
 	size := ui.preview.Size()
 	w, h := size.Width, size.Height
 	if w < 40 || h < 40 {
+		// размер ещё неизвестен — рисуем в типовом поле и перерисуем позже
 		w, h = 300, 330
 	}
+	if w == ui.previewW && h == ui.previewH && ui.previewOpts == optsKey(opts) {
+		return // картинка актуальна
+	}
+	ui.previewW, ui.previewH, ui.previewOpts = w, h, optsKey(opts)
 
 	img := RenderPreview(opts, opts.Numbers[0], w, h)
 	if img == nil {
@@ -868,4 +882,12 @@ func indexOfString(list []string, s string) int {
 		}
 	}
 	return -1
+}
+
+// optsKey — короткий ключ параметров, влияющих на миниатюру.
+func optsKey(o GenerateOptions) string {
+	return fmt.Sprintf("%v|%g|%g|%g|%g|%g|%d|%d|%s|%g|%t|%t|%d,%d,%d|%s|%s",
+		o.Numbers, o.PageWMM, o.PageHMM, o.MarginXMM, o.MarginYMM, o.LineHeightMM(),
+		o.Row, o.Col, o.FontFamily, o.FontSizePt, o.Bold, o.Italic,
+		o.Color.R, o.Color.G, o.Color.B, o.Prefix, o.Suffix)
 }

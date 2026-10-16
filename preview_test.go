@@ -2,6 +2,7 @@ package main
 
 import (
 	"image"
+	"math"
 	"strings"
 	"testing"
 )
@@ -112,5 +113,126 @@ func TestEmbeddedFontNames(t *testing.T) {
 	// имена используются в fpdf как ключи шрифтов
 	if DejaVuFamily == "" || strings.ContainsAny(DejaVuFamily, " ") {
 		t.Fatalf("некорректное имя шрифта: %q", DejaVuFamily)
+	}
+}
+
+// inkBounds возвращает границы тёмных пикселей (номера) внутри листа
+// вместе с границами самого листа.
+func inkBounds(t *testing.T, opts GenerateOptions, number, boxW, boxH int) (page, ink image.Rectangle) {
+	t.Helper()
+
+	img := RenderPreview(opts, number, boxW, boxH)
+	if img == nil {
+		t.Fatal("миниатюра не построена")
+	}
+
+	pw, ph := opts.PageSizeMM()
+	scale := math.Min(float64(boxW-24)/pw, float64(boxH-24)/ph)
+	pageW := int(math.Round(pw * scale))
+	pageH := int(math.Round(ph * scale))
+	originX := int(math.Round(float64(12) + (float64(boxW-24)-float64(pageW))/2))
+	originY := int(math.Round(float64(12) + (float64(boxH-24)-float64(pageH))/2))
+	page = image.Rect(originX, originY, originX+pageW, originY+pageH)
+
+	minX, minY, maxX, maxY := math.MaxInt, math.MaxInt, math.MinInt, math.MinInt
+	for y := page.Min.Y; y < page.Max.Y; y++ {
+		for x := page.Min.X; x < page.Max.X; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			if r>>8 < 140 && g>>8 < 140 && b>>8 < 140 {
+				minX, minY = min(minX, x), min(minY, y)
+				maxX, maxY = max(maxX, x), max(maxY, y)
+			}
+		}
+	}
+	if minX > maxX {
+		t.Fatal("номер не нарисован")
+	}
+	return page, image.Rect(minX, minY, maxX, maxY)
+}
+
+// TestPreviewNumberPosition проверяет, что номер попадает в нужную ячейку
+// сетки 3x3 при любом кегле: раньше при кегле от 20 pt базовая линия
+// вычислялась в неверных единицах и номер уезжал наверх.
+func TestPreviewNumberPosition(t *testing.T) {
+	sizes := []float64{8, 12, 19, 20, 21, 40, 96}
+
+	for _, size := range sizes {
+		for row := RowTop; row <= RowBottom; row++ {
+			for col := ColLeft; col <= ColRight; col++ {
+				opts := baseOptions()
+				opts.Row, opts.Col, opts.FontSizePt = row, col, size
+
+				const boxW, boxH = 445, 325
+				page, ink := inkBounds(t, opts, 1, boxW, boxH)
+
+				// номер должен помещаться в лист
+				inside := page.Inset(-1)
+				if !ink.Min.In(inside) || !ink.Max.In(inside) {
+					t.Fatalf("%gpt, строка %d, столбец %d: номер %v вышел за лист %v",
+						size, row, col, ink, page)
+				}
+
+				cx := float64(ink.Min.X+ink.Max.X) / 2
+				cy := float64(ink.Min.Y+ink.Max.Y) / 2
+				relX := (cx - float64(page.Min.X)) / float64(page.Dx())
+				relY := (cy - float64(page.Min.Y)) / float64(page.Dy())
+
+				var wantX float64
+				switch col {
+				case ColLeft:
+					wantX = 0.25
+				case ColCenter:
+					wantX = 0.5
+				default:
+					wantX = 0.75
+				}
+				if math.Abs(relX-wantX) > 0.2 {
+					t.Errorf("%gpt, столбец %d: номер по X = %.2f, ожидалось около %.2f (лист %v, номер %v)",
+						size, col, relX, wantX, page, ink)
+				}
+
+				// по вертикали номер всегда ближе к своей строке, чем к двум другим
+				var wantRow int
+				switch row {
+				case RowTop:
+					wantRow = 0
+				case RowMiddle:
+					wantRow = 1
+				default:
+					wantRow = 2
+				}
+				dist := math.Abs(relY - []float64{0.12, 0.5, 0.9}[wantRow])
+				for i, target := range []float64{0.12, 0.5, 0.9} {
+					if i == wantRow {
+						continue
+					}
+					if math.Abs(relY-target) < dist {
+						t.Errorf("%gpt, строка %d: номер по Y = %.2f — ближе к строке %d, чем к своей (лист %v, номер %v)",
+							size, row, relY, i, page, ink)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestPreviewNumberIsReadable проверяет, что номер рисуется настоящими
+// глифами, а не заменой-плашкой, при любом кегле.
+func TestPreviewNumberIsReadable(t *testing.T) {
+	for _, size := range []float64{8, 12, 19, 20, 21, 40} {
+		opts := baseOptions()
+		opts.FontSizePt = size
+		opts.Prefix, opts.Suffix = "Стр. ", " —"
+
+		page, ink := inkBounds(t, opts, 42, 445, 325)
+
+		// высота номера должна быть читаемой, а не однопиксельной линией
+		if ink.Dy() < 8 {
+			t.Errorf("%gpt: высота номера %d px — нечитаемо (номер %v, лист %v)", size, ink.Dy(), ink, page)
+		}
+		// и не вылезать за лист
+		if ink.Dx() >= page.Dx() {
+			t.Errorf("%gpt: номер шире листа (%v против %v)", size, ink, page)
+		}
 	}
 }

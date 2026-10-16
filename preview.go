@@ -97,6 +97,16 @@ func RenderPreview(opts GenerateOptions, number int, boxW, boxH int) image.Image
 	return img
 }
 
+// minPreviewFontPx — минимальный кегль номера в миниатюре. На реальном листе
+// A4 кегль 12 pt занимает около 5 пикселей, поэтому в превью цифра
+// показывается крупнее; положение по базовой линии остаётся настоящим.
+const minPreviewFontPx = 12.0
+
+// drawNumber рисует номер страницы в выбранной позиции.
+//
+// Положение считается по-настоящему (в масштабе страницы), но сам номер
+// рисуется минимальным читаемым кеглем, а тонкая линия показывает, где
+// на самом деле окажется нижняя граница строки в PDF.
 func drawNumber(img *image.RGBA, opts GenerateOptions, number int, originX, originY, pageW, pageH, scale float64, c color.RGBA) {
 	label := LabelFor(number, opts.Prefix, opts.Suffix)
 	if label == "" || opts.FontSizePt <= 0 {
@@ -104,20 +114,24 @@ func drawNumber(img *image.RGBA, opts GenerateOptions, number int, originX, orig
 	}
 
 	lineH := opts.LineHeightMM() * scale
+	// центр настоящей строки текста на миниатюре
 	centerY := originY + opts.RowY(opts.LineHeightMM(), pageH/scale)*scale + lineH/2
 
-	fontPx := opts.FontSizePt * 25.4 / 72 * scale
+	trueFontPx := opts.FontSizePt * 25.4 / 72 * scale
+	fontPx := math.Max(trueFontPx, minPreviewFontPx)
 
-	// Ширина текста: если шрифт достаточно крупный, считаем по метрикам,
-	// иначе используем приближение — важен только факт положения.
-	textW := approxTextWidthMM(label, opts.FontSizePt) * scale
-	if fontPx >= 7 {
-		if face := newPreviewFace(opts.Bold, fontPx); face != nil {
-			defer face.Close()
-			d := &font.Drawer{Face: face}
-			textW = float64(d.MeasureString(label).Ceil())
-		}
+	face := newPreviewFace(opts.Bold, fontPx)
+	if face == nil {
+		return
 	}
+	defer face.Close()
+
+	m := face.Metrics()
+	// метрики face приходят в единицах 1/64 — переводим в пиксели
+	ascent := float64(m.Ascent) / 64
+	descent := float64(m.Descent) / 64
+
+	textW := float64((&font.Drawer{Face: face}).MeasureString(label).Ceil())
 	if textW <= 0 {
 		return
 	}
@@ -137,40 +151,55 @@ func drawNumber(img *image.RGBA, opts GenerateOptions, number int, originX, orig
 	default:
 		x = left
 	}
-	if x < originX {
-		x = originX
+
+	// настоящая базовая линия (по настоящим метрикам шрифта)
+	trueBaseline := trueBaselineY(opts, scale, pageH) + originY
+	// базовая линия увеличенного номера, прижатая к центру строки
+	baseline := centerY + (descent-ascent)/2
+
+	if !sameFontSize(trueFontPx, fontPx) {
+		// рисуем направляющую: где в PDF будет низ строки
+		line := color.NRGBA{c.R, c.G, c.B, 0x60}
+		draw.Draw(img,
+			image.Rect(int(math.Round(x)), int(math.Round(trueBaseline)), int(math.Round(x+textW))+1, int(math.Round(trueBaseline))+1),
+			image.NewUniform(line), image.Point{}, draw.Src)
 	}
 
-	if fontPx < 7 {
-		// слишком мелко для чтения — рисуем полоску той же ширины
-		barH := math.Max(2, math.Min(lineH*0.6, fontPx*0.9))
-		rect := image.Rect(
-			int(math.Round(x)),
-			int(math.Round(centerY-barH/2)),
-			int(math.Round(x+textW))+1,
-			int(math.Round(centerY+barH/2))+1,
-		)
-		draw.Draw(img, rect, image.NewUniform(c), image.Point{}, draw.Src)
-		return
+	// номер не должен вылезать за пределы листа
+	minBaseline := originY + ascent
+	maxBaseline := originY + pageH - descent
+	if baseline < minBaseline {
+		baseline = minBaseline
+	}
+	if baseline > maxBaseline {
+		baseline = maxBaseline
+	}
+	if maxBaseline < minBaseline {
+		baseline = centerY
 	}
 
-	face := newPreviewFace(opts.Bold, fontPx)
-	if face == nil {
-		return
-	}
-	defer face.Close()
-
-	m := face.Metrics()
 	d := &font.Drawer{
 		Dst:  img,
 		Src:  image.NewUniform(c),
 		Face: face,
 		Dot: fixed.Point26_6{
 			X: fixed.I(int(math.Round(x))),
-			Y: fixed.I(int(math.Round(centerY + (float64(m.Descent)-float64(m.Ascent))/2))),
+			Y: fixed.I(int(math.Round(baseline))),
 		},
 	}
 	d.DrawString(label)
+}
+
+// trueBaselineY возвращает положение нижней границы настоящей строки текста
+// относительно верха листа, в пикселях миниатюры.
+func trueBaselineY(opts GenerateOptions, scale, pageHeightMM float64) float64 {
+	lh := opts.LineHeightMM()
+	bottom := opts.RowY(lh, pageHeightMM) + lh // низ строки
+	return bottom * scale
+}
+
+func sameFontSize(truePx, px float64) bool {
+	return math.Abs(truePx-px) < 0.01
 }
 
 func drawRectBorder(img *image.RGBA, r image.Rectangle, c color.RGBA) {
